@@ -28,6 +28,8 @@ button:disabled { background: #555; cursor: not-allowed; }
 .tabs { display: flex; gap: 10px; margin-bottom: 20px; }
 .tab { padding: 8px 16px; border-radius: 6px; background: #252525; cursor: pointer; }
 .tab.active { background: #ff4444; }
+textarea { width: 100%; min-height: 120px; padding: 10px; border-radius: 8px; background: #121212; color: #fff; border: 1px solid #333; resize: vertical; }
+.small { font-size: 13px; color: #bbb; margin-bottom: 8px; }
 </style>
 </head>
 <body>
@@ -51,6 +53,8 @@ button:disabled { background: #555; cursor: not-allowed; }
 <input type="text" id="extractUrl" placeholder="Playlist, Channel oder Video-URL...">
 <button onclick="extractVideos()" id="extractBtn">Videos finden</button>
 </div>
+<div class="small">Optional: Falls eine Seite wie aniworld Cookies benötigt, füge hier den Inhalt deiner cookies.txt (Netscape-Format) ein — oder exportiere Cookies aus deinem Browser und füge den Text hier ein.</div>
+<textarea id="cookiesInput" placeholder="Cookies (cookies.txt, Netscape-Format). Nur wenn nötig." title="Füge hier den Inhalt deiner cookies.txt ein"></textarea>
 <input type="text" id="searchBox" placeholder="In Ergebnissen suchen..." oninput="filterResults()">
 <div id="loading" style="display:none;">Lade Videos...</div>
 <div id="error"></div>
@@ -67,6 +71,11 @@ function switchTab(tab, el) {
     document.getElementById("extractTab").style.display = tab === "extract" ? "block" : "none";
 }
 
+function b64EncodeUnicode(str) {
+    // base64 encode unicode safely
+    return btoa(unescape(encodeURIComponent(str)));
+}
+
 async function resolveVideo() {
     const url = document.getElementById("urlInput").value.trim();
     if (!url) return;
@@ -74,7 +83,11 @@ async function resolveVideo() {
     btn.disabled = true;
     btn.textContent = "Lade...";
     try {
-        const res = await fetch("/api/resolve?url=" + encodeURIComponent(url), { method: "POST" });
+        const cookiesText = document.getElementById('cookiesInput') ? document.getElementById('cookiesInput').value.trim() : '';
+        const cookies_b64 = cookiesText ? b64EncodeUnicode(cookiesText) : '';
+        const body = { url };
+        if (cookies_b64) body.cookies_b64 = cookies_b64;
+        const res = await fetch("/api/resolve?url=" + encodeURIComponent(url), { method: "POST", headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         const data = await res.json();
         if (data.qualities) {
             let html = "<h3 style='margin-bottom:10px;'>Qualitäten</h3>";
@@ -83,10 +96,14 @@ async function resolveVideo() {
                 html += '<div class="video-info">';
                 html += '<div class="video-title">' + escapeHtml(q.label) + '</div>';
                 html += '<div class="format-list">';
-                html += '<a class="format-btn" href="/api/download?url=' + encodeURIComponent(q.url) + '" target="_blank">Download</a>';
+                // include cookies_b64 as query param for download links if provided
+                let cookiesParam = cookies_b64 ? ('&cookies_b64=' + encodeURIComponent(cookies_b64)) : '';
+                html += '<a class="format-btn" href="/api/download?url=' + encodeURIComponent(q.url) + cookiesParam + '" target="_blank">Download</a>';
                 html += '</div></div></div>';
             });
             document.getElementById("qualities").innerHTML = html;
+        } else if (data.detail) {
+            alert('Fehler: ' + data.detail);
         }
     } catch (e) {
         alert("Fehler: " + e.message);
@@ -103,12 +120,15 @@ async function extractVideos() {
     document.getElementById("error").style.display = "none";
     document.getElementById("searchBox").style.display = "none";
     allEntries = [];
-    
+    const cookiesText = document.getElementById('cookiesInput') ? document.getElementById('cookiesInput').value.trim() : '';
+    const cookies_b64 = cookiesText ? b64EncodeUnicode(cookiesText) : '';
+
     try {
-        const res = await fetch("/api/extract?url=" + encodeURIComponent(url));
+        const payload = { url };
+        if (cookies_b64) payload.cookies_b64 = cookies_b64;
+        const res = await fetch('/api/extract', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
         const data = await res.json();
         if (!data.success) throw new Error(data.detail || "Unbekannter Fehler");
-        
         allEntries = data.entries || [];
         document.getElementById("searchBox").style.display = allEntries.length > 3 ? "block" : "none";
         renderResults(allEntries);
@@ -139,17 +159,20 @@ function renderResults(entries) {
         if (entry.uploader) html += escapeHtml(entry.uploader) + " ";
         if (duration) html += "| " + duration;
         html += '</div>';
-        
+
         if (entry.formats && entry.formats.length > 0) {
             html += '<div class="format-list">';
             entry.formats.forEach(fmt => {
                 const label = fmt.resolution + " (" + fmt.ext + ")";
-                html += '<a class="format-btn" href="/api/download?url=' + encodeURIComponent(fmt.url) + '" target="_blank">' + escapeHtml(label) + '</a>';
+                // include cookies param for download
+                let cookiesParam = cookies_b64 ? ('&cookies_b64=' + encodeURIComponent(cookies_b64)) : '';
+                html += '<a class="format-btn" href="/api/download?url=' + encodeURIComponent(fmt.url) + cookiesParam + '" target="_blank">' + escapeHtml(label) + '</a>';
             });
             html += '</div>';
         } else {
+            let cookiesParam = cookies_b64 ? ('&cookies_b64=' + encodeURIComponent(cookies_b64)) : '';
             html += '<div class="format-list">';
-            html += '<a class="format-btn" href="/api/download?url=' + encodeURIComponent(entry.url) + '" target="_blank">Download</a>';
+            html += '<a class="format-btn" href="/api/download?url=' + encodeURIComponent(entry.url) + cookiesParam + '" target="_blank">Download</a>';
             html += '</div>';
         }
         html += '</div></div>';
