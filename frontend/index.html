@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Video Downloader</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, -apple-system, sans-serif; background: #0f0f0f; color: #fff; padding: 20px; max-width: 900px; margin: 0 auto; }
+h1 { margin-bottom: 20px; color: #ff4444; }
+.input-group { display: flex; gap: 10px; margin-bottom: 20px; }
+input[type="text"] { flex: 1; padding: 12px; border: 1px solid #333; border-radius: 8px; background: #1a1a1a; color: #fff; font-size: 16px; }
+button { padding: 12px 24px; border: none; border-radius: 8px; background: #ff4444; color: #fff; font-size: 16px; cursor: pointer; }
+button:hover { background: #ff6666; }
+button:disabled { background: #555; cursor: not-allowed; }
+#searchBox { width: 100%; padding: 10px; margin-bottom: 15px; border: 1px solid #333; border-radius: 8px; background: #1a1a1a; color: #fff; display: none; }
+#results { display: none; }
+.video-card { background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 15px; margin-bottom: 15px; display: flex; gap: 15px; align-items: flex-start; }
+.video-card img { width: 160px; height: 90px; object-fit: cover; border-radius: 8px; background: #333; }
+.video-info { flex: 1; }
+.video-title { font-size: 18px; font-weight: 600; margin-bottom: 5px; color: #fff; }
+.video-meta { color: #aaa; font-size: 14px; margin-bottom: 10px; }
+.format-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.format-btn { padding: 6px 12px; border: 1px solid #444; border-radius: 6px; background: #252525; color: #ddd; font-size: 13px; cursor: pointer; text-decoration: none; }
+.format-btn:hover { background: #ff4444; border-color: #ff4444; color: #fff; }
+#loading { text-align: center; padding: 40px; color: #aaa; }
+#error { background: #331111; border: 1px solid #ff4444; color: #ff8888; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: none; }
+.tabs { display: flex; gap: 10px; margin-bottom: 20px; }
+.tab { padding: 8px 16px; border-radius: 6px; background: #252525; cursor: pointer; }
+.tab.active { background: #ff4444; }
+</style>
+</head>
+<body>
+<h1>Video Downloader</h1>
+
+<div class="tabs">
+<div class="tab active" onclick="switchTab('single', this)">Einzelnes Video</div>
+<div class="tab" onclick="switchTab('extract', this)">Video-Explorer</div>
+</div>
+
+<div id="singleTab">
+<div class="input-group">
+<input type="text" id="urlInput" placeholder="URL eingeben (YouTube, aniworld, etc.)...">
+<button onclick="resolveVideo()" id="resolveBtn">Auflösen</button>
+</div>
+<div id="qualities"></div>
+</div>
+
+<div id="extractTab" style="display:none;">
+<div class="input-group">
+<input type="text" id="extractUrl" placeholder="Playlist, Channel oder Video-URL...">
+<button onclick="extractVideos()" id="extractBtn">Videos finden</button>
+</div>
+<input type="text" id="searchBox" placeholder="In Ergebnissen suchen..." oninput="filterResults()">
+<div id="loading" style="display:none;">Lade Videos...</div>
+<div id="error"></div>
+<div id="results"></div>
+</div>
+
+<script>
+let allEntries = [];
+
+function switchTab(tab, el) {
+    document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+    el.classList.add("active");
+    document.getElementById("singleTab").style.display = tab === "single" ? "block" : "none";
+    document.getElementById("extractTab").style.display = tab === "extract" ? "block" : "none";
+}
+
+async function resolveVideo() {
+    const url = document.getElementById("urlInput").value.trim();
+    if (!url) return;
+    const btn = document.getElementById("resolveBtn");
+    btn.disabled = true;
+    btn.textContent = "Lade...";
+    try {
+        const res = await fetch("/api/resolve?url=" + encodeURIComponent(url), { method: "POST" });
+        const data = await res.json();
+        if (data.qualities) {
+            let html = "<h3 style='margin-bottom:10px;'>Qualitäten</h3>";
+            data.qualities.forEach(q => {
+                html += '<div class="video-card">';
+                html += '<div class="video-info">';
+                html += '<div class="video-title">' + escapeHtml(q.label) + '</div>';
+                html += '<div class="format-list">';
+                html += '<a class="format-btn" href="/api/download?url=' + encodeURIComponent(q.url) + '" target="_blank">Download</a>';
+                html += '</div></div></div>';
+            });
+            document.getElementById("qualities").innerHTML = html;
+        }
+    } catch (e) {
+        alert("Fehler: " + e.message);
+    }
+    btn.disabled = false;
+    btn.textContent = "Auflösen";
+}
+
+async function extractVideos() {
+    const url = document.getElementById("extractUrl").value.trim();
+    if (!url) return;
+    document.getElementById("loading").style.display = "block";
+    document.getElementById("results").style.display = "none";
+    document.getElementById("error").style.display = "none";
+    document.getElementById("searchBox").style.display = "none";
+    allEntries = [];
+    
+    try {
+        const res = await fetch("/api/extract?url=" + encodeURIComponent(url));
+        const data = await res.json();
+        if (!data.success) throw new Error(data.detail || "Unbekannter Fehler");
+        
+        allEntries = data.entries || [];
+        document.getElementById("searchBox").style.display = allEntries.length > 3 ? "block" : "none";
+        renderResults(allEntries);
+    } catch (e) {
+        document.getElementById("error").textContent = "Fehler: " + e.message;
+        document.getElementById("error").style.display = "block";
+    }
+    document.getElementById("loading").style.display = "none";
+}
+
+function renderResults(entries) {
+    const container = document.getElementById("results");
+    if (entries.length === 0) {
+        container.innerHTML = "<p style='color:#aaa;text-align:center;'>Keine Videos gefunden.</p>";
+        container.style.display = "block";
+        return;
+    }
+    let html = "<p style='margin-bottom:15px;color:#aaa;'>" + entries.length + " Video(s) gefunden</p>";
+    entries.forEach((entry) => {
+        const duration = entry.duration ? formatTime(entry.duration) : "";
+        html += '<div class="video-card">';
+        if (entry.thumbnail) {
+            html += '<img src="' + escapeHtml(entry.thumbnail) + '" alt="" loading="lazy">';
+        }
+        html += '<div class="video-info">';
+        html += '<div class="video-title">' + escapeHtml(entry.title) + '</div>';
+        html += '<div class="video-meta">';
+        if (entry.uploader) html += escapeHtml(entry.uploader) + " ";
+        if (duration) html += "| " + duration;
+        html += '</div>';
+        
+        if (entry.formats && entry.formats.length > 0) {
+            html += '<div class="format-list">';
+            entry.formats.forEach(fmt => {
+                const label = fmt.resolution + " (" + fmt.ext + ")";
+                html += '<a class="format-btn" href="/api/download?url=' + encodeURIComponent(fmt.url) + '" target="_blank">' + escapeHtml(label) + '</a>';
+            });
+            html += '</div>';
+        } else {
+            html += '<div class="format-list">';
+            html += '<a class="format-btn" href="/api/download?url=' + encodeURIComponent(entry.url) + '" target="_blank">Download</a>';
+            html += '</div>';
+        }
+        html += '</div></div>';
+    });
+    container.innerHTML = html;
+    container.style.display = "block";
+}
+
+function filterResults() {
+    const query = document.getElementById("searchBox").value.toLowerCase();
+    const filtered = allEntries.filter(e => (e.title || "").toLowerCase().includes(query));
+    renderResults(filtered);
+}
+
+function formatTime(sec) {
+    if (!sec) return "";
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return m + ":" + (s < 10 ? "0" : "") + s;
+}
+
+function escapeHtml(text) {
+    if (!text) return "";
+    const div = document.createElement("div");
+    div.textContent = text;
+    return div.innerHTML;
+}
+</script>
+</body>
+</html>
