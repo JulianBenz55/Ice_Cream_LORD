@@ -9,6 +9,10 @@ import base64
 import subprocess
 import json
 from bs4 import BeautifulSoup
+import os
+import urllib.parse
+import requests
+import tempfile
 
 FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 
@@ -30,7 +34,52 @@ HEADERS = {
 PROVIDERS = ["VOE", "Vidoza", "Vidmoly", "Filemoon"]
 
 
+def sanitize_filename(name: str) -> str:
+    if not name:
+        return "video.mp4"
+    # Remove null bytes and surrounding whitespace
+    name = name.replace('\x00', '').strip()
+    # Keep unicode letters/numbers and a few safe punctuation characters
+    name = re.sub(r'[\\/*:?"<>|\n\r\t]+', '_', name)
+    # Limit length
+    if len(name) > 200:
+        name = name[:200]
+    return name
+
+
+def _write_cookies_netscape(session, target_domain="aniworld.to"):
+    jar = session.cookies
+    fd, path = tempfile.mkstemp(prefix="cookies_", suffix=".txt")
+    os.close(fd)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("# Netscape HTTP Cookie File\n")
+            for c in jar:
+                domain = c.domain or target_domain
+                include_subdomains = "TRUE" if domain.startswith(".") else "FALSE"
+                path_val = c.path or "/"
+                secure = "TRUE" if c.secure else "FALSE"
+                expires = str(int(c.expires)) if c.expires else "0"
+                name = c.name
+                value = c.value
+                f.write("\t".join([domain, include_subdomains, path_val, secure, expires, name, value]) + "\n")
+        return path
+    except Exception:
+        if os.path.exists(path):
+            os.remove(path)
+        raise
+
+
 def run_ytdlp_info(url):
+    # Try to pre-fetch the page to obtain cookies (helps with sites requiring a session)
+    cookie_file = None
+    try:
+        session = requests.Session()
+        session.get(url, headers=HEADERS, timeout=15, allow_redirects=True)
+        cookie_file = _write_cookies_netscape(session, target_domain=urllib.parse.urlparse(url).hostname or "aniworld.to")
+    except Exception:
+        cookie_file = None
+
     cmd = [
         "yt-dlp",
         "--no-warnings",
@@ -39,11 +88,26 @@ def run_ytdlp_info(url):
         "--flat-playlist",
         url,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    if result.returncode != 0:
-        raise ValueError("yt-dlp Fehler: " + result.stderr[:500])
-    data = json.loads(result.stdout)
-    return data
+    # add headers
+    for k, v in HEADERS.items():
+        cmd.insert(-1, "--add-header")
+        cmd.insert(-1, f"{k}: {v}")
+    if cookie_file:
+        cmd.insert(-1, "--cookies")
+        cmd.insert(-1, cookie_file)
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+        if result.returncode != 0:
+            raise ValueError("yt-dlp Fehler: " + (result.stderr or result.stdout)[:1000])
+        data = json.loads(result.stdout)
+        return data
+    finally:
+        if cookie_file and os.path.exists(cookie_file):
+            try:
+                os.remove(cookie_file)
+            except Exception:
+                pass
 
 
 def extract_entries(data):
@@ -84,7 +148,6 @@ def extract_entries(data):
 
 
 def get_hoster_link(episode_url, provider):
-    import requests
     session = requests.Session()
     resp = session.get(episode_url, headers=HEADERS, timeout=30)
     if resp.status_code != 200:
@@ -112,8 +175,8 @@ def resolve_voe(session, redirect_url):
     resp = session.get(redirect_url, headers=HEADERS, timeout=30, allow_redirects=True)
     text = resp.text
     patterns = [
-        '"hls":\\s*"([^"]+)"',
-        '"mp4":\\s*"([^"]+)"',
+        '"hls":\\s*"([^\"]+)"',
+        '"mp4":\\s*"([^\"]+)"',
         'let\\s+\\w+\\s*=\\s*"([A-Za-z0-9+/=]{50,})"',
     ]
     for pat in patterns:
@@ -139,15 +202,44 @@ def resolve_voe(session, redirect_url):
 
 
 def resolve_ytdlp(url):
-    result = subprocess.run(
-        ["yt-dlp", "--no-warnings", "-g", url],
-        capture_output=True,
-        text=True,
-        timeout=30
-    )
-    if result.returncode == 0 and result.stdout.strip():
-        return result.stdout.strip().split("\n")[0]
-    raise ValueError("yt-dlp fehlgeschlagen: " + result.stderr)
+    # Use yt-dlp -g to get direct URL. Add headers which some sites require (Referer/User-Agent)
+    cookie_file = None
+    try:
+        session = requests.Session()
+        session.get(url, headers=HEADERS, timeout=15, allow_redirects=True)
+        cookie_file = _write_cookies_netscape(session, target_domain=urllib.parse.urlparse(url).hostname or "aniworld.to")
+    except Exception:
+        cookie_file = None
+
+    cmd = [
+        "yt-dlp",
+        "--no-warnings",
+        "-g",
+        url,
+    ]
+    for k, v in HEADERS.items():
+        cmd.insert(-1, "--add-header")
+        cmd.insert(-1, f"{k}: {v}")
+    if cookie_file:
+        cmd.insert(-1, "--cookies")
+        cmd.insert(-1, cookie_file)
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip().split("\n")[0]
+        raise ValueError("yt-dlp fehlgeschlagen: " + (result.stderr or result.stdout))
+    finally:
+        if cookie_file and os.path.exists(cookie_file):
+            try:
+                os.remove(cookie_file)
+            except Exception:
+                pass
 
 
 def resolve_episode(episode_url, provider):
@@ -195,6 +287,32 @@ async def stream_generator(video_url):
             async for chunk in response.aiter_bytes(chunk_size=8192):
                 if chunk:
                     yield chunk
+
+
+async def infer_filename_from_ytdlp(url, format_id=None):
+    try:
+        data = run_ytdlp_info(url)
+        # If playlist, try first entry
+        if isinstance(data, dict) and data.get("entries"):
+            first = None
+            for e in data["entries"]:
+                if e:
+                    first = e
+                    break
+            data = first or data
+        title = data.get("title") or data.get("id")
+        ext = None
+        if format_id and data.get("formats"):
+            for f in data.get("formats", []):
+                if f.get("format_id") == format_id:
+                    ext = f.get("ext")
+                    break
+        if not ext:
+            ext = data.get("ext") or "mp4"
+        filename = f"{title}.{ext}" if title else None
+        return sanitize_filename(filename) if filename else None
+    except Exception:
+        return None
 
 
 @app.get("/")
@@ -247,6 +365,13 @@ async def download(
     via_ytdlp: bool = Query(False),
 ):
     try:
+        # Try to determine filename via yt-dlp metadata if possible
+        filename = None
+        # First attempt: if original_url or via_ytdlp, ask yt-dlp for title
+        if original_url or via_ytdlp or format_id:
+            meta_source = original_url or url
+            filename = await infer_filename_from_ytdlp(meta_source, format_id=format_id)
+        # Next: try a HEAD request to get Content-Disposition / fallback media type
         async with httpx.AsyncClient() as client:
             head = await client.head(
                 url,
@@ -257,10 +382,19 @@ async def download(
                 },
             )
         media_type = head.headers.get("Content-Type", "video/mp4")
-        filename = "video.mp4"
-        cd = head.headers.get("Content-Disposition", "")
-        if "filename=" in cd:
-            filename = cd.split("filename=")[1].strip('"')
+        if not filename:
+            cd = head.headers.get("Content-Disposition", "")
+            if "filename=" in cd:
+                filename = cd.split("filename=")[1].strip('"')
+        if not filename:
+            # try to infer from URL path
+            path = urllib.parse.urlparse(url).path
+            name = os.path.basename(path)
+            if name:
+                filename = urllib.parse.unquote(name)
+        if not filename:
+            filename = "video.mp4"
+        filename = sanitize_filename(filename)
         generator = stream_generator(url)
         disp = 'attachment; filename="' + filename + '"'
         headers = {"Content-Disposition": disp}
@@ -272,7 +406,10 @@ async def download(
 @app.get("/api/quickdownload")
 async def quickdownload(url: str = Query(...)):
     try:
+        # resolve page -> direct url
         direct_url, provider = resolve_with_fallback(url)
+        # Try to infer filename from the original page via yt-dlp
+        filename = await infer_filename_from_ytdlp(url)
         async with httpx.AsyncClient() as client:
             head = await client.head(
                 direct_url,
@@ -283,10 +420,18 @@ async def quickdownload(url: str = Query(...)):
                 },
             )
         media_type = head.headers.get("Content-Type", "video/mp4")
-        filename = "video.mp4"
-        cd = head.headers.get("Content-Disposition", "")
-        if "filename=" in cd:
-            filename = cd.split("filename=")[1].strip('"')
+        if not filename:
+            cd = head.headers.get("Content-Disposition", "")
+            if "filename=" in cd:
+                filename = cd.split("filename=")[1].strip('"')
+        if not filename:
+            path = urllib.parse.urlparse(direct_url).path
+            name = os.path.basename(path)
+            if name:
+                filename = urllib.parse.unquote(name)
+        if not filename:
+            filename = "video.mp4"
+        filename = sanitize_filename(filename)
         generator = stream_generator(direct_url)
         disp = 'attachment; filename="' + filename + '"'
         headers = {"Content-Disposition": disp}
