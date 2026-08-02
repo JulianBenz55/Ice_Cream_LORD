@@ -323,12 +323,24 @@ def index():
 
 
 @app.post("/api/resolve")
-async def resolve(request: Request, url: str = Query(...)):
+async def resolve(request: Request):
     body = None
     try:
         body = await request.json()
     except Exception:
         body = None
+
+    # extract url from query param or JSON body
+    url = None
+    q_url = request.query_params.get("url")
+    if q_url:
+        url = q_url
+    elif body and isinstance(body, dict):
+        url = body.get("url")
+
+    if not url:
+        raise HTTPException(status_code=400, detail="Missing 'url' parameter")
+
     cookies_b64 = None
     if body and isinstance(body, dict):
         cookies_b64 = body.get("cookies_b64")
