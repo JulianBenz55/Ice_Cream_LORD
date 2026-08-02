@@ -53,7 +53,7 @@ textarea { width: 100%; min-height: 120px; padding: 10px; border-radius: 8px; ba
 <input type="text" id="extractUrl" placeholder="Playlist, Channel oder Video-URL...">
 <button onclick="extractVideos()" id="extractBtn">Videos finden</button>
 </div>
-<div class="small">Optional: Falls eine Seite wie aniworld Cookies benötigt, füge hier den Inhalt deiner cookies.txt (Netscape-Format) ein — oder exportiere Cookies aus deinem Browser und füge den Text hier ein.</div>
+<div class="small">Optional: Falls eine Seite wie aniworld Cookies benötigt, füge hier den Inhalt deiner cookies.txt (Netscape-Format) ein — oder exportiere Cookies aus deinem Browser und füg[...]</div>
 <textarea id="cookiesInput" placeholder="Cookies (cookies.txt, Netscape-Format). Nur wenn nötig." title="Füge hier den Inhalt deiner cookies.txt ein"></textarea>
 <input type="text" id="searchBox" placeholder="In Ergebnissen suchen..." oninput="filterResults()">
 <div id="loading" style="display:none;">Lade Videos...</div>
@@ -63,6 +63,7 @@ textarea { width: 100%; min-height: 120px; padding: 10px; border-radius: 8px; ba
 
 <script>
 let allEntries = [];
+let globalCookiesB64 = "";
 
 function switchTab(tab, el) {
     document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
@@ -121,11 +122,11 @@ async function extractVideos() {
     document.getElementById("searchBox").style.display = "none";
     allEntries = [];
     const cookiesText = document.getElementById('cookiesInput') ? document.getElementById('cookiesInput').value.trim() : '';
-    const cookies_b64 = cookiesText ? b64EncodeUnicode(cookiesText) : '';
+    globalCookiesB64 = cookiesText ? b64EncodeUnicode(cookiesText) : '';
 
     try {
         const payload = { url };
-        if (cookies_b64) payload.cookies_b64 = cookies_b64;
+        if (globalCookiesB64) payload.cookies_b64 = globalCookiesB64;
         const res = await fetch('/api/extract', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
         const data = await res.json();
         if (!data.success) throw new Error(data.detail || "Unbekannter Fehler");
@@ -165,12 +166,12 @@ function renderResults(entries) {
             entry.formats.forEach(fmt => {
                 const label = fmt.resolution + " (" + fmt.ext + ")";
                 // include cookies param for download
-                let cookiesParam = cookies_b64 ? ('&cookies_b64=' + encodeURIComponent(cookies_b64)) : '';
+                let cookiesParam = globalCookiesB64 ? ('&cookies_b64=' + encodeURIComponent(globalCookiesB64)) : '';
                 html += '<a class="format-btn" href="/api/download?url=' + encodeURIComponent(fmt.url) + cookiesParam + '" target="_blank">' + escapeHtml(label) + '</a>';
             });
             html += '</div>';
         } else {
-            let cookiesParam = cookies_b64 ? ('&cookies_b64=' + encodeURIComponent(cookies_b64)) : '';
+            let cookiesParam = globalCookiesB64 ? ('&cookies_b64=' + encodeURIComponent(globalCookiesB64)) : '';
             html += '<div class="format-list">';
             html += '<a class="format-btn" href="/api/download?url=' + encodeURIComponent(entry.url) + cookiesParam + '" target="_blank">Download</a>';
             html += '</div>';
