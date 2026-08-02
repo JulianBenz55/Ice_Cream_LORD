@@ -1,0 +1,554 @@
+downloader.py
+cat > ~/ice-cream/downloader.py << 'PYEOF'
+#!/usr/bin/env python3
+import os
+import sys
+import subprocess
+import json
+import re
+import base64
+import requests
+from bs4 import BeautifulSoup
+
+DOWNLOAD_DIR = "/sdcard/Download/IceCream"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36",
+    "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": "https://aniworld.to/",
+}
+
+PROVIDERS = ["VOE", "Vidoza", "Vidmoly", "Filemoon"]
+
+def clear():
+    os.system("clear")
+
+def print_header():
+    clear()
+    print("╔══════════════════════════════════════╗")
+    print("║     🍦 ICE CREAM DOWNLOADER          ║")
+    print("║     YouTube + AniWorld (lokal)       ║")
+    print("╚══════════════════════════════════════╝")
+    print()
+
+def log(msg):
+    print(f"[DOWNLOADER] {msg}")
+
+def download_ytdlp(url):
+    """Lokaler Download mit yt-dlp."""
+    cmd = [
+        "yt-dlp",
+        "-o", f"{DOWNLOAD_DIR}/%(title)s.%(ext)s",
+        "-f", "best[height<=1080]",
+        "--no-playlist",
+        "--progress",
+        "--no-warnings",
+        url
+    ]
+    print(f"\n[+] Starte Download nach {DOWNLOAD_DIR}...\n")
+    subprocess.run(cmd)
+
+def download_audio(url):
+    """Nur Audio als MP3."""
+    cmd = [
+        "yt-dlp",
+        "-o", f"{DOWNLOAD_DIR}/%(title)s.%(ext)s",
+        "-x", "--audio-format", "mp3",
+        "--audio-quality", "0",
+        "--progress",
+        "--no-warnings",
+        url
+    ]
+    print(f"\n[+] Starte Audio-Download...\n")
+    subprocess.run(cmd)
+
+# ═══════════════════════════════════════════════════════
+# ANIWORLD SCRAPER (aus deiner main.py)
+# ═══════════════════════════════════════════════════════
+
+def get_hoster_link(episode_url, provider):
+    """Finde Hoster-Link auf AniWorld."""
+    log("Lade Episode: " + episode_url)
+    session = requests.Session()
+    resp = session.get(episode_url, headers=HEADERS, timeout=30)
+    log("Status: " + str(resp.status_code))
+    if resp.status_code != 200:
+        raise ValueError("Status " + str(resp.status_code))
+    soup = BeautifulSoup(resp.text, "lxml")
+    
+    # Muster 1: Links mit Provider-Text
+    for a in soup.find_all("a", href=True):
+        text = a.get_text(strip=True).lower()
+        if provider.lower() in text:
+            link = a["href"]
+            if link.startswith("/redirect/"):
+                return session, "https://aniworld.to" + link
+            if link.startswith("http"):
+                return session, link
+    
+    # Muster 2: iframe mit Provider
+    for iframe in soup.find_all("iframe", src=True):
+        src = iframe["src"]
+        if provider.lower() in src.lower():
+            return session, src
+    
+    # Muster 3: data-link Attribute
+    for div in soup.find_all(attrs={"data-link": True}):
+        if provider.lower() in div.get_text(strip=True).lower():
+            return session, div["data-link"]
+    
+    raise ValueError("Kein " + provider + "-Link gefunden.")
+
+def resolve_voe(session, redirect_url):
+    """Löse VOE auf (HLS, MP4, Base64)."""
+    log("Löse VOE auf: " + redirect_url)
+    resp = session.get(redirect_url, headers=HEADERS, timeout=30, allow_redirects=True)
+    text = resp.text
+    
+    # Muster A: "hls" im JSON
+    m = re.search(r'"hls":\s*"([^"]+)"', text)
+    if m:
+        return m.group(1)
+    
+    # Muster B: "mp4" im JSON
+    m = re.search(r'"mp4":\s*"([^"]+)"', text)
+    if m:
+        return m.group(1)
+    
+    # Muster C: Base64-codierte URL
+    m = re.search(r'let\s+\w+\s*=\s*"([A-Za-z0-9+/=]{50,})"', text)
+    if m:
+        try:
+            decoded = base64.b64decode(m.group(1)).decode("utf-8")
+            if decoded.startswith("http"):
+                return decoded
+        except Exception:
+            pass
+    
+    # Muster D: .m3u8 direkt im Text
+    idx = text.find(".m3u8")
+    if idx != -1:
+        start = text.rfind("http", 0, idx)
+        if start != -1:
+            end = idx + 5
+            while end < len(text) and text[end] not in ' "\'\n\r\t<>':
+                end += 1
+            return text[start:end]
+    
+    raise ValueError("VOE konnte nicht aufgelöst werden.")
+
+def resolve_ytdlp(url):
+    """Nutze yt-dlp um Direkt-URL zu bekommen."""
+    cmd = ["yt-dlp", "--no-warnings", "-g", url]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip().split("\n")[0]
+    raise ValueError("yt-dlp fehlgeschlagen: " + (result.stderr or result.stdout))
+
+def resolve_episode(episode_url, provider):
+    """Hauptfunktion: Episode-URL -> Direkt-Video-URL."""
+    provider = provider.lower()
+    
+    # Versuch 1: Hoster-Link finden + VOE auflösen
+    try:
+        session, hoster_url = get_hoster_link(episode_url, provider)
+        if provider == "voe":
+            return resolve_voe(session, hoster_url)
+    except Exception as e:
+        log("VOE Resolver fehlgeschlagen: " + str(e))
+    
+    # Versuch 2: yt-dlp direkt mit Episode-URL
+    try:
+        return resolve_ytdlp(episode_url)
+    except Exception as e:
+        log("yt-dlp Episode fehlgeschlagen: " + str(e))
+    
+    # Versuch 3: yt-dlp mit Hoster-URL
+    try:
+        session, hoster_url = get_hoster_link(episode_url, provider)
+        return resolve_ytdlp(hoster_url)
+    except Exception as e:
+        log("yt-dlp Hoster fehlgeschlagen: " + str(e))
+    
+    raise ValueError("Alle Methoden fehlgeschlagen.")
+
+def resolve_with_fallback(episode_url):
+    """Versuche alle Provider nacheinander."""
+    last_error = None
+    for provider in PROVIDERS:
+        try:
+            url = resolve_episode(episode_url, provider)
+            log(f"[✓] Erfolg mit {provider}!")
+            return url, provider
+        except Exception as e:
+            last_error = e
+            log(f"{provider} fehlgeschlagen: {str(e)[:100]}")
+    raise last_error or RuntimeError("Kein Provider verfügbar.")
+
+def download_aniworld(episode_url):
+    """Kompletter AniWorld-Download."""
+    print(f"\n[+] AniWorld-Erkennung: {episode_url}")
+    print("[+] Starte lokales Scraping (deine IP wird nicht blockiert)...")
+    
+    try:
+        direct_url, provider = resolve_with_fallback(episode_url)
+        print(f"[✓] Provider: {provider}")
+        print(f"[+] Direkt-URL: {direct_url[:80]}...")
+        print("[+] Starte Download...\n")
+        download_ytdlp(direct_url)
+        return True
+    except Exception as e:
+        print(f"\n[-] AniWorld-Download fehlgeschlagen: {e}")
+        print("[!] Mögliche Ursachen:")
+        print("    • Die Episode existiert nicht")
+        print("    • AniWorld hat die Seitenstruktur geändert")
+        print("    • Alle Hoster sind offline")
+        return False
+
+# ═══════════════════════════════════════════════════════
+# MENÜ
+# ═══════════════════════════════════════════════════════
+
+def show_downloads():
+    print(f"\n📁 Downloads in {DOWNLOAD_DIR}:")
+    print("-" * 45)
+    try:
+        files = sorted(os.listdir(DOWNLOAD_DIR))
+        if not files:
+            print("Noch keine Dateien.")
+        else:
+            total = 0
+            for i, f in enumerate(files, 1):
+                path = os.path.join(DOWNLOAD_DIR, f)
+                size = os.path.getsize(path)
+                size_mb = size / (1024*1024)
+                total += size_mb
+                print(f"  {i}. {f}")
+                print(f"     {size_mb:.1f} MB")
+            print("-" * 45)
+            print(f"  Gesamt: {total:.1f} MB")
+    except Exception as e:
+        print(f"Fehler: {e}")
+    print("-" * 45)
+    input("\nEnter zum Fortfahren...")
+
+def update_from_github():
+    print("\n🔄 Prüfe auf Updates...")
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    result = subprocess.run(["git", "pull"], capture_output=True, text=True)
+    print(result.stdout)
+    if result.returncode != 0:
+        print("Fehler:", result.stderr)
+    input("\nEnter zum Fortfahren...")
+
+def main():
+    while True:
+        print_header()
+        print("  1️⃣  YouTube Video (MP4)")
+        print("  2️⃣  YouTube Audio (MP3)")
+        print("  3️⃣  AniWorld Episode (lokal gescraped)")
+        print("  4️⃣  Beliebige URL (yt-dlp)")
+        print("  5️⃣  Meine Downloads anzeigen")
+        print("  6️⃣  Update von GitHub")
+        print("  0️⃣  Beenden")
+        print()
+        
+        choice = input("Wähle (0-6): ").strip()
+        
+        if choice == "1":
+            url = input("\nYouTube-URL: ").strip()
+            if url:
+                download_ytdlp(url)
+            input("\nEnter zum Fortfahren...")
+        
+        elif choice == "2":
+            url = input("\nYouTube-URL: ").strip()
+            if url:
+                download_audio(url)
+            input("\nEnter zum Fortfahren...")
+        
+        elif choice == "3":
+            url = input("\nAniWorld-Episoden-URL: ").strip()
+            if url:
+                download_aniworld(url)
+            input("\nEnter zum Fortfahren...")
+        
+        elif choice == "4":
+            url = input("\nBeliebige URL: ").strip()
+            if url:
+                download_ytdlp(url)
+            input("\nEnter zum Fortfahren...")
+        
+        elif choice == "5":
+            show_downloads()
+        
+        elif choice == "6":
+            update_from_github()
+        
+        elif choice == "0":
+            print("\n👋 Bis zum nächsten Mal!")
+            break
+
+if __name__ == "__main__":
+    main()
+PYEOF
+
+chmod +x ~/ice-cream/downloader.py
+
+
+mkdir -p ~/ice-cream && cat > ~/ice-cream/downloader.py << 'PYEOF'
+#!/usr/bin/env python3
+import os
+import sys
+import subprocess
+import re
+import base64
+import requests
+from bs4 import BeautifulSoup
+
+DOWNLOAD_DIR = "/sdcard/Download/IceCream"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36",
+    "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": "https://aniworld.to/",
+}
+
+PROVIDERS = ["VOE", "Vidoza", "Vidmoly", "Filemoon"]
+
+def clear():
+    os.system("clear")
+
+def print_header():
+    clear()
+    print("╔══════════════════════════════════════╗")
+    print("║     🍦 ICE CREAM DOWNLOADER          ║")
+    print("║     YouTube + AniWorld (lokal)       ║")
+    print("╚══════════════════════════════════════╝")
+    print()
+
+def log(msg):
+    print(f"[DOWNLOADER] {msg}")
+
+def download_ytdlp(url):
+    cmd = [
+        "yt-dlp",
+        "-o", f"{DOWNLOAD_DIR}/%(title)s.%(ext)s",
+        "-f", "best[height<=1080]",
+        "--no-playlist",
+        "--progress",
+        "--no-warnings",
+        url
+    ]
+    print(f"\n[+] Starte Download nach {DOWNLOAD_DIR}...\n")
+    subprocess.run(cmd)
+
+def download_audio(url):
+    cmd = [
+        "yt-dlp",
+        "-o", f"{DOWNLOAD_DIR}/%(title)s.%(ext)s",
+        "-x", "--audio-format", "mp3",
+        "--audio-quality", "0",
+        "--progress",
+        "--no-warnings",
+        url
+    ]
+    print(f"\n[+] Starte Audio-Download...\n")
+    subprocess.run(cmd)
+
+def get_hoster_link(episode_url, provider):
+    log("Lade Episode: " + episode_url)
+    session = requests.Session()
+    resp = session.get(episode_url, headers=HEADERS, timeout=30)
+    log("Status: " + str(resp.status_code))
+    if resp.status_code != 200:
+        raise ValueError("Status " + str(resp.status_code))
+    soup = BeautifulSoup(resp.text, "lxml")
+    for a in soup.find_all("a", href=True):
+        text = a.get_text(strip=True).lower()
+        if provider.lower() in text:
+            link = a["href"]
+            if link.startswith("/redirect/"):
+                return session, "https://aniworld.to" + link
+            if link.startswith("http"):
+                return session, link
+    for iframe in soup.find_all("iframe", src=True):
+        src = iframe["src"]
+        if provider.lower() in src.lower():
+            return session, src
+    for div in soup.find_all(attrs={"data-link": True}):
+        if provider.lower() in div.get_text(strip=True).lower():
+            return session, div["data-link"]
+    raise ValueError("Kein " + provider + "-Link gefunden.")
+
+def resolve_voe(session, redirect_url):
+    log("Löse VOE auf: " + redirect_url)
+    resp = session.get(redirect_url, headers=HEADERS, timeout=30, allow_redirects=True)
+    text = resp.text
+    m = re.search(r'"hls":\s*"([^"]+)"', text)
+    if m:
+        return m.group(1)
+    m = re.search(r'"mp4":\s*"([^"]+)"', text)
+    if m:
+        return m.group(1)
+    m = re.search(r'let\s+\w+\s*=\s*"([A-Za-z0-9+/=]{50,})"', text)
+    if m:
+        try:
+            decoded = base64.b64decode(m.group(1)).decode("utf-8")
+            if decoded.startswith("http"):
+                return decoded
+        except Exception:
+            pass
+    idx = text.find(".m3u8")
+    if idx != -1:
+        start = text.rfind("http", 0, idx)
+        if start != -1:
+            end = idx + 5
+            while end < len(text) and text[end] not in ' "\'\n\r\t<>':
+                end += 1
+            return text[start:end]
+    raise ValueError("VOE konnte nicht aufgelöst werden.")
+
+def resolve_ytdlp(url):
+    cmd = ["yt-dlp", "--no-warnings", "-g", url]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip().split("\n")[0]
+    raise ValueError("yt-dlp fehlgeschlagen.")
+
+def resolve_episode(episode_url, provider):
+    provider = provider.lower()
+    try:
+        session, hoster_url = get_hoster_link(episode_url, provider)
+        if provider == "voe":
+            return resolve_voe(session, hoster_url)
+    except Exception as e:
+        log("VOE Resolver fehlgeschlagen: " + str(e))
+    try:
+        return resolve_ytdlp(episode_url)
+    except Exception as e:
+        log("yt-dlp Episode fehlgeschlagen: " + str(e))
+    try:
+        session, hoster_url = get_hoster_link(episode_url, provider)
+        return resolve_ytdlp(hoster_url)
+    except Exception as e:
+        log("yt-dlp Hoster fehlgeschlagen: " + str(e))
+    raise ValueError("Alle Methoden fehlgeschlagen.")
+
+def resolve_with_fallback(episode_url):
+    last_error = None
+    for provider in PROVIDERS:
+        try:
+            url = resolve_episode(episode_url, provider)
+            log(f"[✓] Erfolg mit {provider}!")
+            return url, provider
+        except Exception as e:
+            last_error = e
+            log(f"{provider} fehlgeschlagen: {str(e)[:100]}")
+    raise last_error or RuntimeError("Kein Provider verfügbar.")
+
+def download_aniworld(episode_url):
+    print(f"\n[+] AniWorld-Erkennung: {episode_url}")
+    print("[+] Starte lokales Scraping...")
+    try:
+        direct_url, provider = resolve_with_fallback(episode_url)
+        print(f"[✓] Provider: {provider}")
+        print(f"[+] Direkt-URL: {direct_url[:80]}...")
+        print("[+] Starte Download...\n")
+        download_ytdlp(direct_url)
+        return True
+    except Exception as e:
+        print(f"\n[-] AniWorld-Download fehlgeschlagen: {e}")
+        print("[!] Mögliche Ursachen:")
+        print("    • Die Episode existiert nicht")
+        print("    • AniWorld hat die Seitenstruktur geändert")
+        print("    • Alle Hoster sind offline")
+        return False
+
+def show_downloads():
+    print(f"\n📁 Downloads in {DOWNLOAD_DIR}:")
+    print("-" * 45)
+    try:
+        files = sorted(os.listdir(DOWNLOAD_DIR))
+        if not files:
+            print("Noch keine Dateien.")
+        else:
+            total = 0
+            for i, f in enumerate(files, 1):
+                path = os.path.join(DOWNLOAD_DIR, f)
+                size = os.path.getsize(path)
+                size_mb = size / (1024*1024)
+                total += size_mb
+                print(f"  {i}. {f}")
+                print(f"     {size_mb:.1f} MB")
+            print("-" * 45)
+            print(f"  Gesamt: {total:.1f} MB")
+    except Exception as e:
+        print(f"Fehler: {e}")
+    print("-" * 45)
+    input("\nEnter zum Fortfahren...")
+
+def update_from_github():
+    print("\n🔄 Prüfe auf Updates...")
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    result = subprocess.run(["git", "pull"], capture_output=True, text=True)
+    print(result.stdout)
+    if result.returncode != 0:
+        print("Fehler:", result.stderr)
+    input("\nEnter zum Fortfahren...")
+
+def main():
+    while True:
+        print_header()
+        print("  1️⃣  YouTube Video (MP4)")
+        print("  2️⃣  YouTube Audio (MP3)")
+        print("  3️⃣  AniWorld Episode (lokal gescraped)")
+        print("  4️⃣  Beliebige URL (yt-dlp)")
+        print("  5️⃣  Meine Downloads anzeigen")
+        print("  6️⃣  Update von GitHub")
+        print("  0️⃣  Beenden")
+        print()
+        choice = input("Wähle (0-6): ").strip()
+        if choice == "1":
+            url = input("\nYouTube-URL: ").strip()
+            if url:
+                download_ytdlp(url)
+            input("\nEnter zum Fortfahren...")
+        elif choice == "2":
+            url = input("\nYouTube-URL: ").strip()
+            if url:
+                download_audio(url)
+            input("\nEnter zum Fortfahren...")
+        elif choice == "3":
+            url = input("\nAniWorld-Episoden-URL: ").strip()
+            if url:
+                download_aniworld(url)
+            input("\nEnter zum Fortfahren...")
+        elif choice == "4":
+            url = input("\nBeliebige URL: ").strip()
+            if url:
+                download_ytdlp(url)
+            input("\nEnter zum Fortfahren...")
+        elif choice == "5":
+            show_downloads()
+        elif choice == "6":
+            update_from_github()
+        elif choice == "0":
+            print("\n👋 Bis zum nächsten Mal!")
+            break
+
+if __name__ == "__main__":
+    main()
+PYEOF
+chmod +x ~/ice-cream/downloader.py && echo 'alias ice="python3 ~/ice-cream/downloader.py"' >> ~/.bashrc && source ~/.bashrc && echo "✅ Fertig! Tippe 'ice' zum Starten."
+
+ice
+
+1
+python3 ~/ice-cream/downloader.py
+ice
+
+python3 ~/ice-cream/downloader.py
+
