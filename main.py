@@ -398,14 +398,23 @@ async def resolve(request: Request):
 
 
 @app.post("/api/extract")
-async def extract(request: Request, url: str = Query(None)):
+async def extract(request: Request):
     body = None
     try:
         body = await request.json()
     except Exception:
         body = None
-    if not url and body and isinstance(body, dict):
+
+    # extract url from query param or JSON body
+    url = None
+    q_url = request.query_params.get("url")
+    if q_url:
+        url = q_url
+    elif body and isinstance(body, dict):
         url = body.get("url")
+
+    if not url:
+        raise HTTPException(status_code=400, detail="Missing 'url' parameter")
     cookies_b64 = None
     if body and isinstance(body, dict):
         cookies_b64 = body.get("cookies_b64")
